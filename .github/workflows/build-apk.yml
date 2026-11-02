@@ -1,4 +1,3 @@
-
 name: Build Zielnik APK
 
 on:
@@ -85,7 +84,7 @@ jobs:
                   Set<Integer> activeIds = new HashSet<>();
 
                   for (TaskStore.Task task : tasks) {
-                      int notificationId = BASE_ID + task.id;
+                      int notificationId = BASE_ID + (int) task.id;
                       activeIds.add(notificationId);
                       showTask(app, task);
                   }
@@ -115,7 +114,7 @@ jobs:
 
                   PendingIntent contentPendingIntent = PendingIntent.getActivity(
                       app,
-                      task.id,
+                      (int) task.id,
                       openIntent,
                       PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
                   );
@@ -125,7 +124,7 @@ jobs:
 
                   PendingIntent deletePendingIntent = PendingIntent.getBroadcast(
                       app,
-                      task.id,
+                      (int) task.id,
                       dismissIntent,
                       PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
                   );
@@ -155,7 +154,7 @@ jobs:
                       .setAutoCancel(false)
                       .setOnlyAlertOnce(true);
 
-                  manager.notify(BASE_ID + task.id, builder.build());
+                  manager.notify(BASE_ID + (int) task.id, builder.build());
               }
           }
           '''
@@ -170,7 +169,7 @@ jobs:
           public class NotificationDismissReceiver extends BroadcastReceiver {
               @Override
               public void onReceive(Context context, Intent intent) {
-                  int taskId = intent.getIntExtra("task_id", -1);
+                  long taskId = intent.getLongExtra("task_id", -1L);
                   if (taskId < 0) return;
 
                   for (TaskStore.Task task : TaskStore.get(context)) {
@@ -241,4 +240,3 @@ jobs:
           name: zielnik-apk
           path: Zielnik/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          
