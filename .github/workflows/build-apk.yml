@@ -30,15 +30,61 @@ jobs:
           packages: ""
 
       - name: Install Android SDK components
-        run: |
-          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
-
-      - name: Install Android SDK components
-        run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
+        run: sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Extract project
+        run: unzip -q Zielnik-projekt.zip
+
+      - name: Fix empty-task startup
         run: |
-          unzip -q Zielnik-projekt.zip
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("Zielnik/app/src/main/java/pl/zielnik/app/ReminderService.java")
+          source = path.read_text()
+
+          old = """    static void requestSync(Context context) {
+                  Intent intent = new Intent(context, ReminderService.class);
+                  intent.setAction("SYNC");
+                  if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent); else context.startService(intent);
+              }"""
+
+          new = """    static void requestSync(Context context) {
+                  Intent intent = new Intent(context, ReminderService.class);
+                  intent.setAction("SYNC");
+
+                  if (TaskStore.get(context).isEmpty()) {
+                      NotificationManager manager =
+                              (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+                      if (Build.VERSION.SDK_INT >= 23) {
+                          for (android.service.notification.StatusBarNotification active
+                                  : manager.getActiveNotifications()) {
+                              int id = active.getId();
+                              if (id >= BASE_ID && id < BASE_ID + 1000000) {
+                                  manager.cancel(id);
+                              }
+                          }
+                      }
+                      context.stopService(intent);
+                      return;
+                  }
+
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      context.startForegroundService(intent);
+                  } else {
+                      context.startService(intent);
+                  }
+              }"""
+
+          if old not in source:
+              raise SystemExit("Nie znaleziono oczekiwanego kodu requestSync — przerwano poprawianie.")
+
+          path.write_text(source.replace(old, new, 1))
+          print("Poprawka zastosowana.")
+          PY
+
+      - name: Build debug APK
+        run: |
           cd Zielnik
           gradle assembleDebug --no-daemon
 
