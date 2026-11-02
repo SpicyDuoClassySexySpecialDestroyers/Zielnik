@@ -35,52 +35,199 @@ jobs:
       - name: Extract project
         run: unzip -q Zielnik-projekt.zip
 
-      - name: Fix empty-task startup
+      - name: Replace notification system
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import xml.etree.ElementTree as ET
 
-          path = Path("Zielnik/app/src/main/java/pl/zielnik/app/ReminderService.java")
-          source = path.read_text()
+          base = Path("Zielnik/app/src/main")
+          java = base / "java/pl/zielnik/app"
+          service = java / "ReminderService.java"
+          manifest = base / "AndroidManifest.xml"
 
-          old = """    static void requestSync(Context context) {
-                  Intent intent = new Intent(context, ReminderService.class);
-                  intent.setAction("SYNC");
-                  if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent); else context.startService(intent);
-              }"""
+          reminder_code = r'''
+          package pl.zielnik.app;
 
-          new = """    static void requestSync(Context context) {
-                  Intent intent = new Intent(context, ReminderService.class);
-                  intent.setAction("SYNC");
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.os.Build;
 
-                  if (TaskStore.get(context).isEmpty()) {
-                      NotificationManager manager =
-                              (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
-                      if (Build.VERSION.SDK_INT >= 23) {
-                          for (android.service.notification.StatusBarNotification active
-                                  : manager.getActiveNotifications()) {
-                              int id = active.getId();
-                              if (id >= BASE_ID && id < BASE_ID + 1000000) {
-                                  manager.cancel(id);
-                              }
-                          }
-                      }
-                      context.stopService(intent);
-                      return;
-                  }
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Set;
+
+          public class ReminderService {
+              private static final int BASE_ID = 10000;
+              private static final String CHANNEL_ID = "zielnik_reminders";
+
+              static void requestSync(Context context) {
+                  Context app = context.getApplicationContext();
+                  NotificationManager manager =
+                      (NotificationManager) app.getSystemService(Context.NOTIFICATION_SERVICE);
+
+                  if (manager == null) return;
 
                   if (Build.VERSION.SDK_INT >= 26) {
-                      context.startForegroundService(intent);
-                  } else {
-                      context.startService(intent);
+                      NotificationChannel channel = new NotificationChannel(
+                          CHANNEL_ID,
+                          "Przypomnienia Zielnika",
+                          NotificationManager.IMPORTANCE_DEFAULT
+                      );
+                      manager.createNotificationChannel(channel);
                   }
-              }"""
 
-          if old not in source:
-              raise SystemExit("Nie znaleziono oczekiwanego kodu requestSync — przerwano poprawianie.")
+                  List<TaskStore.Task> tasks = TaskStore.get(app);
+                  Set<Integer> activeIds = new HashSet<>();
 
-          path.write_text(source.replace(old, new, 1))
-          print("Poprawka zastosowana.")
+                  for (TaskStore.Task task : tasks) {
+                      int notificationId = BASE_ID + task.id;
+                      activeIds.add(notificationId);
+                      showTask(app, task);
+                  }
+
+                  if (Build.VERSION.SDK_INT >= 23) {
+                      for (android.service.notification.StatusBarNotification item
+                              : manager.getActiveNotifications()) {
+                          int id = item.getId();
+                          if (id >= BASE_ID && id < BASE_ID + 1000000
+                                  && !activeIds.contains(id)) {
+                              manager.cancel(id);
+                          }
+                      }
+                  }
+              }
+
+              static void showTask(Context context, TaskStore.Task task) {
+                  Context app = context.getApplicationContext();
+                  NotificationManager manager =
+                      (NotificationManager) app.getSystemService(Context.NOTIFICATION_SERVICE);
+
+                  if (manager == null) return;
+
+                  Intent openIntent = new Intent(app, MainActivity.class);
+                  openIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                      | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+
+                  PendingIntent contentPendingIntent = PendingIntent.getActivity(
+                      app,
+                      task.id,
+                      openIntent,
+                      PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                  );
+
+                  Intent dismissIntent = new Intent(app, NotificationDismissReceiver.class);
+                  dismissIntent.putExtra("task_id", task.id);
+
+                  PendingIntent deletePendingIntent = PendingIntent.getBroadcast(
+                      app,
+                      task.id,
+                      dismissIntent,
+                      PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                  );
+
+                  String description = task.description == null
+                      ? "" : task.description.trim();
+
+                  Notification.Builder builder;
+
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      builder = new Notification.Builder(app, CHANNEL_ID);
+                  } else {
+                      builder = new Notification.Builder(app);
+                  }
+
+                  builder
+                      .setSmallIcon(R.drawable.ic_leaf)
+                      .setContentTitle(task.title)
+                      .setContentText(description.isEmpty()
+                          ? "Przypomnienie z Zielnika" : description)
+                      .setStyle(new Notification.BigTextStyle().bigText(
+                          description.isEmpty()
+                              ? "Przypomnienie z Zielnika" : description))
+                      .setContentIntent(contentPendingIntent)
+                      .setDeleteIntent(deletePendingIntent)
+                      .setOngoing(true)
+                      .setAutoCancel(false)
+                      .setOnlyAlertOnce(true);
+
+                  manager.notify(BASE_ID + task.id, builder.build());
+              }
+          }
+          '''
+
+          receiver_code = r'''
+          package pl.zielnik.app;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          public class NotificationDismissReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context context, Intent intent) {
+                  int taskId = intent.getIntExtra("task_id", -1);
+                  if (taskId < 0) return;
+
+                  for (TaskStore.Task task : TaskStore.get(context)) {
+                      if (task.id == taskId) {
+                          ReminderService.showTask(context, task);
+                          return;
+                      }
+                  }
+              }
+          }
+          '''
+
+          service.write_text(reminder_code.strip() + "\n")
+          (java / "NotificationDismissReceiver.java").write_text(
+              receiver_code.strip() + "\n"
+          )
+
+          ET.register_namespace("android", "http://schemas.android.com/apk/res/android")
+          tree = ET.parse(manifest)
+          root = tree.getroot()
+          ns = "{http://schemas.android.com/apk/res/android}"
+
+          for permission in list(root.findall("uses-permission")):
+              name = permission.get(ns + "name", "")
+              if name in (
+                  "android.permission.FOREGROUND_SERVICE",
+                  "android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
+              ):
+                  root.remove(permission)
+
+          application = root.find("application")
+          if application is None:
+              raise SystemExit("Nie znaleziono elementu application w manifeście.")
+
+          for element in list(application):
+              name = element.get(ns + "name", "")
+              if name in (".ReminderService", "pl.zielnik.app.ReminderService"):
+                  if element.tag == "service":
+                      application.remove(element)
+
+          receiver_exists = any(
+              element.tag == "receiver"
+              and element.get(ns + "name") in (
+                  ".NotificationDismissReceiver",
+                  "pl.zielnik.app.NotificationDismissReceiver"
+              )
+              for element in application
+          )
+
+          if not receiver_exists:
+              receiver = ET.SubElement(application, "receiver")
+              receiver.set(ns + "name", ".NotificationDismissReceiver")
+              receiver.set(ns + "enabled", "true")
+              receiver.set(ns + "exported", "false")
+
+          tree.write(manifest, encoding="utf-8", xml_declaration=True)
+          print("Zmieniono system powiadomień i manifest.")
           PY
 
       - name: Build debug APK
